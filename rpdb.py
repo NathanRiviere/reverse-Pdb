@@ -6,22 +6,29 @@ global instance
 
 DEBUG = True
 
-class Frame():
-    def __init__(self, frame):
+class Line():
+    def __init__(self, frame, lines):
         for attr in dir(frame):
             # Ignore private functions
-            if attr[0] == attr[1] and attr[0] == '_':
+            if attr == "f_back" or attr[0] == "_":
                 continue
-            setattr(self, attr, getattr(frame, attr))
+            else:
+                setattr(self, attr, copy(getattr(frame, attr)))
+        self._frame = frame
+        n_frames = len(lines)
+        for i in range(n_frames):
+            f = lines[-1*(i+1)]
+            if self._frame is not f._frame:
+                self.f_back = f
+                return
+        self.f_back = None
 
 class rPdb(pdb.Pdb):
-    # Goal: Add ability to step forwarda nd backward through individual lines
     def __init__(self):
         super().__init__(skip=__name__)
-        # Start dispatching events to trace_dispatch funciton
         self.trace_set = False
         self.quitting = False
-        self.frame_stack = []
+        self.lines = []
         self.in_hidden_scope = True
 
     def start(self, frame=None):
@@ -35,14 +42,7 @@ class rPdb(pdb.Pdb):
         self.in_hidden_scope = True
         sys.settrace(self.trace_dispatch)
 
-    # store frame info for reverse command
-    def save_frame(self, frame, event, arg):
-        if DEBUG:
-            print(f"Saving frame {frame}")
-        self.frame_stack.append(Frame(frame))
-
     def trace_dispatch(self, frame, event, arg):
-        # Hide frames until we leave module scope
         if frame.f_globals["__name__"] == __name__:
             self.in_hidden_scope = True
             return self.trace_dispatch
@@ -51,26 +51,37 @@ class rPdb(pdb.Pdb):
                 self.in_hidden_scope = False
                 return self.trace_dispatch(frame,event,arg)
             return self.trace_dispatch
-        self.save_frame(frame, event, arg)
+        if DEBUG:
+            print(f"Saving line obj {frame}")
+        line = Line(frame, self.lines)
+        self.lines.append(line)
         if self.trace_set:
-            # pass to pdb if we're currently interacting
-            super().trace_dispatch(frame, event, arg)
+            super().trace_dispatch(line, event, arg)
         return self.trace_dispatch
 
-    # next command in opposite directions
+    def stop_here(self, frame):
+        return super().stop_here(self.get_line(frame))
+
+    def get_line(self, frame):
+        for f in self.lines:
+            if f._frame is frame or f is frame:
+                return f
+        print("Could not find frame in frame stack")
+        return None
+
     def do_reverse(self, arg):
-        self.frame_stack.pop()
-        previous_frame = self.frame_stack.pop()
-        if DEBUG:
-            print(f"previous frame: {previous_frame}")
-        self.interaction(previous_frame, None)
+        current_line = self.lines.pop()
+        previous_line = self.lines.pop()
+        self.interaction(previous_line, None)
         return 1
 
-    # bind re command to reverse function (see cmd.onecmd)
     do_re = do_reverse
 
+    def set_trace(self):
+        return super().set_trace(self.lines[-1])
+
 def set_trace():
-    instance.set_trace(sys._getframe().f_back)
+    instance.set_trace()
     instance.trace_set = True
 
 instance = rPdb()
