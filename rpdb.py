@@ -7,43 +7,40 @@ global instance
 DEBUG = True
 
 class Line():
-    def __init__(self, frame, lines):
+    def __init__(self, frame):
         for attr in dir(frame):
             # Ignore private functions
-            if attr == "f_back" or attr[0] == "_":
+            if attr[0] == "_":
                 continue
+            if attr == "f_back":
+                setattr(self, attr, getattr(frame, attr))
             else:
                 setattr(self, attr, copy(getattr(frame, attr)))
         self._frame = frame
-        n_frames = len(lines)
-        for i in range(n_frames):
-            f = lines[-1*(i+1)]
-            if self._frame is not f._frame:
-                self.f_back = f
-                return
-        self.f_back = None
+
+    def __str__(self):
+        return f"\nline: {self.f_lineno}\nlocals : {self.f_locals}"
 
 class rPdb(pdb.Pdb):
     def __init__(self):
         super().__init__(skip=__name__)
+        self.muted_modules = ["rpdb","pdb", "bdb", "cmd"]
         self.trace_set = False
         self.quitting = False
-        self.lines = []
+        self.line_stack = []
         self.in_hidden_scope = True
 
-    def start(self, frame=None):
-        if frame is None:
-            frame = sys._getframe().f_back
+    def start(self):
+        frame = sys._getframe().f_back
         self.reset()
         while frame:
             frame.f_trace = self.trace_dispatch
             self.botframe = frame
             frame = frame.f_back
-        self.in_hidden_scope = True
         sys.settrace(self.trace_dispatch)
 
     def trace_dispatch(self, frame, event, arg):
-        if frame.f_globals["__name__"] == __name__:
+        if frame.f_globals["__name__"] in __name__:
             self.in_hidden_scope = True
             return self.trace_dispatch
         if self.in_hidden_scope:
@@ -53,32 +50,70 @@ class rPdb(pdb.Pdb):
             return self.trace_dispatch
         if DEBUG:
             print(f"Saving line obj {frame}")
-        line = Line(frame, self.lines)
-        self.lines.append(line)
+        line = Line(frame)
+        self.line_stack.append(line)
         if self.trace_set:
-            super().trace_dispatch(line, event, arg)
+            super().trace_dispatch(frame, event, arg)
         return self.trace_dispatch
 
-    def stop_here(self, frame):
-        return super().stop_here(self.get_line(frame))
+    # pdb override
+    def _getval(self, arg):
+        try:
+            return eval(arg, self.curframe_globals, self.curframe_locals)
+        except:
+            exc_info = sys.exc_info()[:2]
+            self.error(traceback.format_exception_only(*exc_info)[-1].strip())
+            raise
 
-    def get_line(self, frame):
-        for f in self.lines:
-            if f._frame is frame or f is frame:
-                return f
-        print("Could not find frame in frame stack")
-        return None
+    # pdb override
+    def default(self, line):
+        if line[:1] == '!': line = line[1:]
+        locals = self.curframe_locals
+        globals = self.curframe_globals
+        try:
+            code = compile(line + '\n', '<stdin>', 'single')
+            save_stdout = sys.stdout
+            save_stdin = sys.stdin
+            save_displayhook = sys.displayhook
+            try:
+                sys.stdin = self.stdin
+                sys.stdout = self.stdout
+                sys.displayhook = self.displayhook
+                exec(code, globals, locals)
+            finally:
+                sys.stdout = save_stdout
+                sys.stdin = save_stdin
+                sys.displayhook = save_displayhook
+        except Exception as e:
+            print(e)
 
     def do_reverse(self, arg):
-        current_line = self.lines.pop()
-        previous_line = self.lines.pop()
-        self.interaction(previous_line, None)
+        # Current line
+        self.line_stack.pop()
+        previous_line = self.line_stack[-1]
+        frame = sys._getframe()
+        while frame:
+            if frame.f_globals["__name__"] == "__main__":
+                break
+            frame = frame.f_back
+        if self.setup(frame, None):
+            # no interaction desired at this time (happens if .pdbrc contains
+            # a command like "continue")
+            self.forget()
+            return
+        self.curframe_locals = previous_line.f_locals
+        self.curframe_globals = previous_line.f_globals
+        self._set_stopinfo(frame, None)
+        plineno = previous_line.f_lineno
+        self.do_jump(plineno)
+        self._cmdloop()
+        self.forget()
         return 1
 
     do_re = do_reverse
 
     def set_trace(self):
-        return super().set_trace(self.lines[-1])
+        return super().set_trace(sys._getframe().f_back)
 
 def set_trace():
     instance.set_trace()
